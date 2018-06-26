@@ -1,1 +1,1 @@
-worker: php cheat.php $SALIENS_TOKEN
+worker: php cheat_heroku.php $SALIENS_TOKEN
