@@ -1,0 +1,19 @@
+{
+    "name": "SalienCheat",
+    "description": "Cheating Salien minigame, the proper way",
+    "repository": "https://github.com/SteamDatabase/SalienCheat",
+    "env": {
+        "SALIENS_TOKEN": {
+            "description": "Get token from https://steamcommunity.com/saliengame/gettoken and place below",
+            "value": ""
+        }
+    },
+    "formation": {
+        "web": {
+            "quantity": 0
+        },
+        "worker": {
+            "quantity": 1
+        }
+    }
+}
