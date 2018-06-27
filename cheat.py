@@ -16,6 +16,7 @@ from datetime import datetime
 import requests
 from tqdm import tqdm
 
+# determine input func
 try:
     _input = raw_input
 except:
@@ -41,8 +42,6 @@ def get_access_token(force_input=False):
 
                 if not token_re.match(token):
                     token = ''
-                else:
-                    game.log("^GRN++^NOR Loaded token from token.txt")
 
     if not token:
         token = _input("Login to steamcommunity.com\n"
@@ -94,18 +93,20 @@ class Saliens(requests.Session):
 
         data = None
         resp = None
+        deadline = time() + 30
 
         while not data:
             try:
                 resp = self.post(self.api_url % endpoint, data=form_fields)
 
-                eresult = resp.headers.get('X-eresult', -1)
+                eresult = int(resp.headers.get('X-eresult', -1))
+
                 if resp.status_code != 200:
                     raise Exception("HTTP %s EResult %s\n%s" % (resp.status_code, eresult, resp.text))
 
                 rdata = resp.json()
                 if 'response' not in rdata:
-                    raise Exception("NoJSON EResult %s" % (resp.status_code, eresult))
+                    raise Exception("NoJSON EResult %s" % eresult)
             except Exception as exp:
                 self.log("^RED-- POST %-46s %s", endpoint, str(exp))
 
@@ -114,6 +115,11 @@ class Saliens(requests.Session):
                     continue
             else:
                 self.log("^GRY   POST %-46s HTTP %s EResult %s", endpoint, resp.status_code, eresult)
+
+                if eresult == 93 and time() < deadline:
+                    sleep(3)
+                    continue
+
                 data = rdata['response']
 
             if not retry:
@@ -124,13 +130,13 @@ class Saliens(requests.Session):
 
         return data
 
-    def sget(self, endpoint, query_params=None, retry=False):
+    def sget(self, endpoint, query_params=None, retry=False, timeout=15):
         data = None
         resp = None
 
         while not data:
             try:
-                resp = self.get(self.api_url % endpoint, params=query_params)
+                resp = self.get(self.api_url % endpoint, params=query_params, timeout=timeout)
 
                 eresult = resp.headers.get('X-eresult', -1)
                 if resp.status_code != 200:
@@ -138,11 +144,11 @@ class Saliens(requests.Session):
 
                 rdata = resp.json()
                 if 'response' not in rdata:
-                    raise Exception("NoJSON EResult %s" % (resp.status_code, eresult))
+                    raise Exception("NoJSON EResult %s" % eresult)
             except Exception as exp:
                 self.log("^RED-- GET  %-46s %s", endpoint, str(exp))
 
-                if resp is None or resp.status_code >= 500:
+                if (resp is None and retry) or (resp and resp.status_code >= 500):
                     sleep(2)
                     continue
             else:
@@ -177,20 +183,28 @@ class Saliens(requests.Session):
         self.player_info = self.spost('ITerritoryControlMinigameService/GetPlayerInfo', retry=True)
         return self.player_info
 
-    def refresh_planet_info(self):
+    def refresh_planet_info(self, retry=True, timeout=15):
         if 'active_planet' in self.player_info:
-            self.planet = self.get_planet(self.player_info['active_planet'])
+            planet = self.get_planet(self.player_info['active_planet'], retry=retry, timeout=timeout)
+
+            if planet is not None:
+                self.planet = planet
         else:
             self.planet = {}
 
         self.pbar_refresh()
         return self.planet
 
-    def get_planet(self, pid):
-        planet = self.sget('ITerritoryControlMinigameService/GetPlanet',
-                           {'id': pid, '_': int(time())},
-                           retry=True,
-                           ).get('planets', [{}])[0]
+    def get_planet(self, pid, retry=True, timeout=15):
+        data = self.sget('ITerritoryControlMinigameService/GetPlanet',
+                         {'id': pid, '_': int(time())},
+                         retry=retry,
+                         timeout=timeout,
+                         )
+        if data is None:
+            return
+        else:
+            planet = data.get('planets', [{}])[0]
 
         if planet:
             planet['easy_zones'] = sorted((z for z in planet['zones']
@@ -201,15 +215,15 @@ class Saliens(requests.Session):
 
             planet['medium_zones'] = sorted((z for z in planet['zones']
                                              if (not z['captured']
-                                                 and z['difficulty'] == 2
-                                                 and z.get('capture_progress', 0) < 0.95)),
+                                                 and z['difficulty'] == 2)),
+#                                                and z.get('capture_progress', 0) < 0.90)),
                                             reverse=True,
                                             key=lambda x: x['zone_position'])
 
             planet['hard_zones'] = sorted((z for z in planet['zones']
                                            if (not z['captured']
-                                               and z['difficulty'] == 3
-                                               and z.get('capture_progress', 0) < 0.95)),
+                                               and z['difficulty'] == 3)),
+#                                              and z.get('capture_progress', 0) < 0.95)),
                                           reverse=True,
                                           key=lambda x: x['zone_position'])
             planet['boss_zones'] = sorted((z for z in planet['zones']
@@ -262,13 +276,15 @@ class Saliens(requests.Session):
         self.zone_id = pos
         return self.spost('ITerritoryControlMinigameService/JoinZone', {'zone_position': pos})
 
-    def leave_zone(self):
+    def leave_zone(self, clear_rate=True):
         if 'active_zone_game' in self.player_info:
             self.spost('IMiniGameService/LeaveGame',
                        {'gameid': self.player_info['active_zone_game']},
                        retry=False)
         self.zone_id = None
-        self.zone_capture_rate = 0
+
+        if clear_rate:
+            self.zone_capture_rate = 0
 
     def leave_planet(self):
         if 'active_planet' in self.player_info:
@@ -394,7 +410,6 @@ class Saliens(requests.Session):
             self.zone_pbar.desc = "Zone"
             self.zone_pbar.n = 0
             self.zone_pbar.total = 0
-            self.zone_pbar.rate_psec = 0
             self.zone_pbar.last_print_t = time()
             self.zone_pbar.bar_format = self.zone_pbar.bar_format_tmpl % ''
 
@@ -404,14 +419,13 @@ class Saliens(requests.Session):
     _plog_text = None
 
     def log(self, text, *args):
+        text = text % args
         text += "^NOR"
 
         for k, v in self.colors:
             text = text.replace(k, v)
 
-        text = text % args
-
-        max_collapsed = 5
+        max_collapsed = 10
 
         if text == self._plog_text:
             self._plog_c += 1
@@ -455,8 +469,8 @@ class Saliens(requests.Session):
 # ----- MAIN -------
 
 
-game = Saliens(None)
-game.access_token = get_access_token()
+access_token = get_access_token()
+game = Saliens(access_token)
 
 # display current stats
 game.log("^GRN++^NOR Getting player info...")
@@ -491,26 +505,34 @@ for planet in planets:
 
 # join battle
 try:
-    while planets:
+    while True:
+        if not planets:
+            game.log("^GRN++ No planets left. Hmm? Gonna keep checkin...")
+            sleep(10)
+            planets = game.get_uncaptured_planets()
+            continue
+
         planet_id = planets[0]['id']
+        # ensures we are not stuck in a zone
         game.leave_zone()
 
         # determine which planet to join
         if not game.planet or game.planet['id'] != planet_id:
             game.log("^GRN++^NOR Joining toughest planet ^GRN%s^NOR..", planets[0]['id'])
 
+            # join planet and confirm it was success, otherwise retry
             for i in range(3):
                 game.join_planet(planet_id)
                 sleep(1)
                 game.refresh_player_info()
 
-                if game.player_info['active_planet'] == planet_id:
+                if game.player_info.get('active_planet') == planet_id:
                     break
 
                 game.log("^RED-- Failed to join planet. Retrying...")
                 game.leave_planet()
 
-            if i >= 2 and game.player_info['active_planet'] != planet_id:
+            if i >= 2 and game.player_info.get('active_planet') != planet_id:
                 continue
 
         else:
@@ -519,8 +541,8 @@ try:
         game.refresh_planet_info()
 
         # show planet info
-        giveaway_appds = game.planet['giveaway_apps']
-        top_clans = [c['clan_info']['url'] for c in game.planet.get('top_clans', []) if 'url' in c['clan_info']][:5]
+        giveaway_appds = game.planet.get('giveaway_apps', [])
+        top_clans = [c['clan_info']['url'] for c in game.planet.get('top_clans', []) if 'url' in c.get('clan_info', {})][:5]
 
         game.print_planet(game.planet)
         game.log("^YEL>>^NOR Giveaway AppIDs: %s", giveaway_appds)
@@ -531,25 +553,30 @@ try:
 
         # selecting zone
         while game.planet and game.planet['id'] == planets[0]['id']:
+            # retry represent on free agents
+            if 'clan_info' not in game.player_info:
+                game.represent_clan(4777282)
+
             zones = (game.planet['boss_zones']
                      + game.planet['hard_zones']
                      + game.planet['medium_zones']
                      + game.planet['easy_zones'])
 
+#           # filter out zones that are very close to getting captured
+#           while (zones
+#                  and zones[0]['difficulty'] > 1
+#                  and (zones[0].get('capture_progress', 0)
+#                       + min(game.zone_capture_rate, 0.2) >= 1)):
+#               zones.pop(0)
+
             if not zones:
-                game.log("No open zones left on planet")
+                game.log("^GRN++^NOR No open zones left on planet")
                 game.player_info.pop('active_planet')
                 break
 
-            i = 0
-            if (game.zone_id == zones[i]['zone_position']
-                and (zones[i].get('capture_progress', 0)
-                     + min(game.zone_capture_rate, 0.1) < 1)):
-                i += 1
-
-            zone_id = zones[i]['zone_position']
-            difficulty = zones[i]['difficulty']
-            game.zone_capture_rate = 0
+            # choose highest priority zone
+            zone_id = zones[0]['zone_position']
+            difficulty = zones[0]['difficulty']
 
             deadline = time() + 60 * 10  # rescan planets every 10min
 
@@ -569,9 +596,14 @@ try:
             while (game.planet
                    and time() < deadline
                    and not game.planet['zones'][zone_id]['captured']
-                   and (game.planet['zones'][zone_id].get('capture_progress', 0)
-                        + min(game.zone_capture_rate, 0.1) < 1)
                    ):
+
+#               # skip if zone is likely to get captured while we wait, except easy zones
+#               if (game.planet['zones'][zone_id]['difficulty'] > 1
+#                  and (game.planet['zones'][zone_id].get('capture_progress', 0)
+#                       + min(game.zone_capture_rate, 0.2) >= 1)):
+#                   game.log("^GRN++^NOR Zone likely to complete early. Moving on...")
+#                   break
 
                 game.log("^GRN++^NOR Fighting in ^YEL%szone^NOR %s (^YEL%s^NOR) for ^YEL110sec",
                          'boss ' if game.planet['zones'][zone_id]['type'] == 4 else '',
@@ -579,31 +611,32 @@ try:
                          dmap.get(difficulty, difficulty))
 
                 game.join_zone(zone_id)
+                stoptime = time() + 109.6
                 game.refresh_player_info()
-
-                stoptime = time() + 110
 
                 # refresh progress bars while in battle
                 for i in count(start=1):
                     # stop when battle is finished or zone was captured
-                    if time() >= stoptime or game.planet['zones'][zone_id]['captured']:
+                    if time() >= stoptime:  # or game.planet['zones'][zone_id]['captured']:
                         break
 
                     sleep(1)
 
                     if (i % 11) == 0:
-                        game.refresh_planet_info()
+                        game.refresh_planet_info(retry=False, timeout=max(0, stoptime - time()))
+                        game.pbar_refresh()
 
-                    game.pbar_refresh()
+#               if game.planet['zones'][zone_id]['captured']:
+#                   game.log("^RED-- Zone was captured before we could submit score")
+#               else:
+                score = 120 * (5 * (2**(difficulty - 1)))
+                game.log("^GRN++^NOR Submitting score of ^GRN%s^NOR...", score)
+                game.report_score(score)
+                game.refresh_player_info()
+                game.refresh_planet_info()
 
-                if game.planet['zones'][zone_id]['captured']:
-                    game.log("^RED-- Zone was captured before we could submit score")
-                else:
-                    score = 120 * (5 * (2**(difficulty - 1)))
-                    game.log("^GRN++^NOR Submitting score of ^GRN%s^NOR...", score)
-                    game.report_score(score)
-                    game.refresh_player_info()
-                    game.refresh_planet_info()
+                # incase user gets stuck
+                game.leave_zone(False)
 
             # Rescan planets after zone is finished
             game.log("^GRN++^NOR Rescanning planets...")
